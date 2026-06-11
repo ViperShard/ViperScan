@@ -1,0 +1,28 @@
+# Python bytecode (decompilable — never publish)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / envs
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ViperScan runtime data (scans, scope, engagement, config)
+.viperscan/
+.phantom/
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Backups
+*.bak
+*.bak-*

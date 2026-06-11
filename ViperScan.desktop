@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ViperScan
+GenericName=Network Device Scanner
+Comment=See every device on the network you're on and flag cameras, mics & unknown devices
+Exec=/home/kuiu-mc-crank/ViperScan/viperscan-run.sh
+Icon=/home/kuiu-mc-crank/ViperScan/assets/ViperShardOfficialLogo-4x.png
+Terminal=true
+Categories=Network;Security;System;
+Keywords=network;scanner;devices;camera;security;wifi;lan;
+StartupNotify=true
