@@ -274,6 +274,44 @@ python3 viperscan.py            # from inside the ViperScan/ folder
 ./viperscan-run.sh --web
 ```
 
+### Docker
+
+```bash
+docker compose up                      # dashboard → http://localhost:8731
+# or
+docker build -t viperscan .
+docker run --rm -it --net host viperscan          # dashboard
+docker run --rm -it --net host viperscan --cli    # one-shot terminal report
+```
+
+`--net host` is **required** — ViperScan discovers devices by ARP/ping on the
+host's LAN, which a bridged container can't see. Mount a volume on `/data`
+(`-v viperscan-data:/data`) to persist scope/known-devices/config across runs.
+
+### Prometheus metrics
+
+The dashboard exposes a `/metrics` endpoint in Prometheus text format —
+device counts, online/new/flagged totals, open-port count, per-flag and
+per-category gauges, and scan timing. Point Prometheus at it and graph your
+network in Grafana:
+
+```yaml
+scrape_configs:
+  - job_name: viperscan
+    static_configs: [{ targets: ["localhost:8731"] }]
+```
+
+(`/metrics` is read-only counts only — no per-device detail. It's served on
+whatever address you bind; keep the dashboard on loopback unless your scrape
+host needs it, then `--bind 0.0.0.0` on a trusted network.)
+
+### Keyboard & mouse
+
+In the dashboard: <kbd>s</kbd> scan now · <kbd>e</kbd> export ·
+<kbd>/</kbd> jump to the network field · <kbd>?</kbd> shortcut help ·
+<kbd>Esc</kbd> close. **Right-click any device** for copy IP / MAC / vendor and
+a one-click OUI lookup.
+
 ### Optional: sharper discovery
 - Run as **root** with `scapy` installed and ViperScan adds a true ARP broadcast
   sweep (catches the last stragglers). Neither is required — the no-root path

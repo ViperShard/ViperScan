@@ -212,6 +212,61 @@ _STATE = {"meta": {}, "devices": [], "scanning": False, "last": 0, "events": []}
 _CONFIG = {"mode": "quick", "net": None, "interval": 45.0, "no_nmap": False,
            "keepalive": True, "keepalive_interval": 10.0}
 _LOCK = threading.Lock()
+
+
+def _prom_escape(v):
+    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _metrics_text():
+    """Prometheus text-format exposition of the latest scan (for Grafana/homelab
+    monitoring stacks). Read-only counts — no per-device detail leaks."""
+    with _LOCK:
+        devices = list(_STATE["devices"])
+        meta = dict(_STATE["meta"])
+        scanning = _STATE.get("scanning")
+        last = _STATE.get("last") or 0
+    by_flag, by_cat = {}, {}
+    online = newc = flagged = ports = 0
+    for d in devices:
+        if d.get("icmp_alive"):
+            online += 1
+        if d.get("is_new") or "NEW" in (d.get("flags") or []):
+            newc += 1
+        if d.get("is_alert"):
+            flagged += 1
+        ports += len(d.get("open_ports") or {})
+        for f in (d.get("flags") or []):
+            by_flag[f] = by_flag.get(f, 0) + 1
+        cat = d.get("category") or "unknown"
+        by_cat[cat] = by_cat.get(cat, 0) + 1
+    out = []
+
+    def metric(name, helptext, val, typ="gauge"):
+        out.append("# HELP %s %s" % (name, helptext))
+        out.append("# TYPE %s %s" % (name, typ))
+        out.append("%s %s" % (name, val))
+
+    metric("viperscan_devices_total", "Devices found in the last scan.", len(devices))
+    metric("viperscan_devices_online", "Devices that answered ICMP in the last scan.", online)
+    metric("viperscan_devices_new", "Devices first seen on this network in the last scan.", newc)
+    metric("viperscan_devices_flagged", "Devices carrying at least one alert flag.", flagged)
+    metric("viperscan_open_ports_total", "Open ports across all devices.", ports)
+    metric("viperscan_scanning", "1 while a scan is in progress, else 0.", 1 if scanning else 0)
+    metric("viperscan_last_scan_timestamp_seconds", "Unix time of the last completed scan.", int(last))
+    if isinstance(meta.get("elapsed"), (int, float)):
+        metric("viperscan_scan_duration_seconds", "Duration of the last scan, seconds.", round(meta["elapsed"], 2))
+    if isinstance(meta.get("scanned"), int):
+        metric("viperscan_scanned_addresses", "Addresses probed in the last scan.", meta["scanned"])
+    out.append("# HELP viperscan_devices_by_flag Devices per flag.")
+    out.append("# TYPE viperscan_devices_by_flag gauge")
+    for f, n in sorted(by_flag.items()):
+        out.append('viperscan_devices_by_flag{flag="%s"} %d' % (_prom_escape(f), n))
+    out.append("# HELP viperscan_devices_by_category Devices per category.")
+    out.append("# TYPE viperscan_devices_by_category gauge")
+    for c, n in sorted(by_cat.items()):
+        out.append('viperscan_devices_by_category{category="%s"} %d' % (_prom_escape(c), n))
+    return "\n".join(out) + "\n"
 _RESCAN = threading.Event()
 
 # State-changing GET endpoints that must carry the per-session token + a loopback
@@ -231,10 +286,33 @@ def _apply(args, cfg) -> None:
     args.no_nmap = cfg["no_nmap"]
 
 
+def _wol(mac):
+    """Send a Wake-on-LAN magic packet (6×0xFF + 16×the MAC) to the broadcast
+    address on the standard WoL ports. Harmless if the device isn't WoL-capable;
+    returns True if a well-formed packet was sent."""
+    hexmac = re.sub(r"[^0-9a-fA-F]", "", mac or "")
+    if len(hexmac) != 12:
+        return False
+    try:
+        payload = b"\xff" * 6 + bytes.fromhex(hexmac) * 16
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for port in (9, 7):                 # 9 = discard (standard WoL), 7 = echo
+            try:
+                s.sendto(payload, ("255.255.255.255", port))
+            except OSError:
+                pass
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
 def _wake_device(ip, attempts=4):
-    """Burst-ping + TCP-knock a single device to wake it and report whether it
-    came online. ICMP first (cheap); if it's silent, knock common TCP ports —
-    that nudges devices that ignore ping — then ping once more."""
+    """Wake-on-LAN magic packet (if we know the MAC) + burst-ping + TCP-knock, then
+    report whether it came online. WoL first (the real wake), then ICMP (cheap); if
+    still silent, knock common TCP ports — that nudges devices that ignore ping."""
+    wol_sent = _wol((_find_device(ip) or {}).get("mac"))
     alive = False
     rtt = None
     pings = 0
@@ -264,7 +342,7 @@ def _wake_device(ip, attempts=4):
         if a:
             alive, rtt = True, r
     return {"ip": ip, "alive": alive, "rtt": rtt, "pings": pings,
-            "knocked": knocked, "ts": time.strftime("%H:%M:%S")}
+            "knocked": knocked, "wol": wol_sent, "ts": time.strftime("%H:%M:%S")}
 
 
 def _keepalive_loop():
@@ -458,6 +536,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/devices":
             with _LOCK:
                 self._json({**_STATE, "config": _CONFIG, "build": _BUILD_ID})
+        elif path == "/metrics":            # Prometheus scrape target (read-only counts)
+            body = _metrics_text().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif path == "/api/selfcheck":
             from . import selfcheck
             self._json(selfcheck.run())
@@ -1010,6 +1095,16 @@ PAGE = r"""<!DOCTYPE html>
   .card.alert{box-shadow:inset 2px 0 0 var(--red)}
   a{color:var(--green)}
   ::selection{background:rgba(52,226,122,.3)}
+  /* right-click device menu */
+  #ctxmenu{position:fixed;display:none;z-index:90;min-width:190px;background:#0c1118;border:1px solid var(--line);border-radius:9px;padding:5px;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+  .ctxitem{padding:7px 11px;font-size:13px;color:var(--txt);border-radius:6px;cursor:pointer;white-space:nowrap}
+  .ctxitem:hover{background:rgba(255,255,255,.07)}
+  /* keyboard-shortcut help overlay */
+  #helpov{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(4,6,9,.72);z-index:95}
+  #helpov .hbox{background:#0c1118;border:1px solid var(--line);border-radius:14px;padding:22px 26px;min-width:300px}
+  #helpov h3{margin:0 0 14px;font-size:14px;color:var(--txt)}
+  #helpov .hrow{display:flex;justify-content:space-between;gap:24px;font-size:13px;padding:5px 0;color:var(--dim)}
+  #helpov kbd{background:rgba(255,255,255,.08);border:1px solid var(--line);border-radius:5px;padding:1px 7px;font-family:ui-monospace,monospace;color:var(--txt)}
 </style></head>
 <body>
 <header>
@@ -1146,7 +1241,40 @@ function hasWeb(d){return (d.flags||[]).includes("EXPOSED")||Object.keys(d.open_
 function findDev(ip){return DEV.find(d=>d.ip===ip);}
 function cardClick(ev,ip){ if(ev.target.closest("details,a,button"))return; openDevice(ip); }
 function closeDevice(){ stopPoll(); stopLocVizLoop(); api("/api/locate/stop").catch(()=>{}); MODAL_IP=null; document.getElementById("overlay").classList.remove("on"); }
-document.addEventListener("keydown",e=>{ if(e.key==="Escape"){closeDevice();closePanel();} });
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"){ closeDevice(); closePanel(); hideCtxMenu(); hideHelp(); return; }
+  const t=e.target, tag=(t&&t.tagName||"").toLowerCase();
+  if(tag==="input"||tag==="textarea"||(t&&t.isContentEditable)) return;   // don't hijack typing
+  if(e.metaKey||e.ctrlKey||e.altKey) return;
+  if(e.key==="s"||e.key==="r"){ e.preventDefault(); const b=document.getElementById("rescan"); if(b)b.click(); }
+  else if(e.key==="e"){ e.preventDefault(); window.open("/api/export","_blank"); }
+  else if(e.key==="/"){ e.preventDefault(); const n=document.getElementById("netinput"); if(n)n.focus(); }
+  else if(e.key==="?"){ e.preventDefault(); toggleHelp(); }
+});
+// --- right-click device context menu + keyboard help overlay ---
+function hideCtxMenu(){ const m=document.getElementById("ctxmenu"); if(m)m.style.display="none"; }
+function copyText(t){ try{ navigator.clipboard.writeText(t); flash("Copied: "+t); }catch(_){ flash("Copy not available (needs https/localhost)"); } }
+function cardMenu(e,ip){
+  e.preventDefault(); e.stopPropagation();
+  const d=findDev(ip); if(!d)return;
+  const items=[
+    ["⧉ Copy IP", ()=>copyText(d.ip)],
+    d.mac?["⧉ Copy MAC", ()=>copyText(d.mac)]:null,
+    ["⧉ Copy IP · MAC · vendor", ()=>copyText([d.ip,d.mac||"",d.vendor||""].filter(Boolean).join("  "))],
+    ["↗ Open device card", ()=>openDevice(d.ip)],
+    d.mac?["↗ Vendor (OUI) lookup", ()=>window.open("https://www.wireshark.org/tools/oui-lookup.html?q="+encodeURIComponent(d.mac.slice(0,8)),"_blank")]:null
+  ].filter(Boolean);
+  const m=document.getElementById("ctxmenu");
+  m.innerHTML=items.map((it,i)=>'<div class="ctxitem" data-i="'+i+'">'+esc(it[0])+'</div>').join("");
+  Array.from(m.children).forEach((el,i)=>el.onclick=()=>{ hideCtxMenu(); items[i][1](); });
+  m.style.display="block";
+  m.style.left=Math.min(e.clientX, innerWidth-210)+"px";
+  m.style.top=Math.min(e.clientY, innerHeight-12-items.length*32)+"px";
+}
+document.addEventListener("click",hideCtxMenu);
+window.addEventListener("scroll",hideCtxMenu,true);
+function toggleHelp(){ const h=document.getElementById("helpov"); if(h)h.style.display=(h.style.display==="flex")?"none":"flex"; }
+function hideHelp(){ const h=document.getElementById("helpov"); if(h)h.style.display="none"; }
 
 function aboutHTML(d){
   const svc=d.services||{}, rows=[];
@@ -1407,15 +1535,16 @@ function renderLocate(r,ip){
 }
 function wakeDevice(ip){
   const b=document.getElementById("wakebtn"), st=document.getElementById("wake-status");
-  if(b)b.disabled=true; if(st){st.className="muted";st.innerHTML='<span class="spin"></span> pinging '+esc(ip)+'…';}
+  if(b)b.disabled=true; if(st){st.className="muted";st.innerHTML='<span class="spin"></span> waking '+esc(ip)+'…';}
   api("/api/wake?ip="+encodeURIComponent(ip)).then(r=>{
     if(b)b.disabled=false; if(!st)return;
     if(!r||r.error){ st.innerHTML='<span style="color:var(--red)">failed</span>'; return; }
+    const wol = r.wol?'Wake-on-LAN packet sent · ':'';
     if(r.alive){
-      st.innerHTML='<span style="color:var(--green)">● online</span> — replied'+(r.rtt!=null?(' in '+r.rtt+' ms'):'')+
+      st.innerHTML='<span style="color:var(--green)">● online</span> — '+wol+'replied'+(r.rtt!=null?(' in '+r.rtt+' ms'):'')+
         (r.knocked&&r.knocked.length?(' · woke via TCP '+r.knocked.join(', ')):'');
     } else {
-      st.innerHTML='<span style="color:var(--red)">○ no response</span> — sent '+r.pings+' pings + TCP knocks; '+
+      st.innerHTML='<span style="color:var(--red)">○ no response</span> — '+wol+'sent '+r.pings+' pings + TCP knocks; '+
         'it may be powered off, asleep, or firewalling probes'+(r.knocked&&r.knocked.length?(' (open ports: '+r.knocked.join(', ')+')'):'')+'.';
     }
   });
@@ -1820,7 +1949,7 @@ function card(d){
   const mark=d.is_self?' <span class="tag">(this device)</span>':d.is_gateway?' <span class="tag">(gateway)</span>':'';
   const trustmark=d.trust==="trusted"?' <span class="tmark t-ok">trusted</span>':d.trust==="untrusted"?' <span class="tmark t-bad">untrusted</span>':'';
   const tags=(d.tags&&d.tags.length)?`<div class="tags2">${d.tags.map(t=>`<span class="tag2">${esc(t)}</span>`).join('')}</div>`:'';
-  return `<div class="${cls.join(' ')}" onclick="cardClick(event,'${escJs(d.ip)}')">
+  return `<div class="${cls.join(' ')}" onclick="cardClick(event,'${escJs(d.ip)}')" oncontextmenu="cardMenu(event,'${escJs(d.ip)}')">
     <div class="top"><div class="ico ico-${d.category||'unknown'}">${catIcon(d)}</div>
       <div style="flex:1;min-width:0">
         <div class="name">${esc(d.display_name||d.device_type)}${mark}${trustmark}</div>
@@ -1963,5 +2092,17 @@ function refreshIntelBadge(){ api("/api/intel").then(r=>{ const b=document.getEl
 refreshIntelBadge(); setInterval(refreshIntelBadge,30000);
 
 </script>
+<div id="ctxmenu"></div>
+<div id="helpov" onclick="if(event.target===this)hideHelp()">
+  <div class="hbox">
+    <h3>⌨ Keyboard shortcuts</h3>
+    <div class="hrow"><span>Scan / rescan now</span><kbd>s</kbd></div>
+    <div class="hrow"><span>Export inventory (JSON)</span><kbd>e</kbd></div>
+    <div class="hrow"><span>Jump to network field</span><kbd>/</kbd></div>
+    <div class="hrow"><span>Close modal / menu</span><kbd>Esc</kbd></div>
+    <div class="hrow"><span>This help</span><kbd>?</kbd></div>
+    <div class="hrow" style="margin-top:8px;color:var(--dim2,#6b7785)"><span>Right-click a device for copy / lookup</span><span></span></div>
+  </div>
+</div>
 </body></html>
 """
