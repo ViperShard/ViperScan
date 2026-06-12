@@ -13,7 +13,22 @@ viperscan
 ```
 
 It's **pure Python, standard library only.** No `pip install`, no scapy, no root
-required. If `python3` is there, ViperScan runs.
+required.
+
+### Platform support
+
+ViperScan is **Linux-first** — that's where it's built and tested, and where
+every feature works.
+
+| OS | Status |
+|---|---|
+| **Linux** | ✅ Fully supported — all features |
+| **macOS** | ⚠️ Partial — core scan, web dashboard and audit run; vendor ID falls back to the built-in brand map if nmap's OUI DB isn't installed; the **Wi-Fi locator does not work** (it needs Linux `AF_PACKET` + monitor mode) |
+| **Windows** | ❌ Not yet — discovery relies on Linux networking tools (`ip`, `iw`) and `/proc`; needs a port. PRs welcome |
+
+The **Wi-Fi RF locator** (`--locate`) is **Linux-only** by design — it uses a raw
+`AF_PACKET` monitor-mode socket. Everything else is portable in principle; the
+Linux assumptions are just not yet abstracted for macOS/Windows.
 
 ---
 
@@ -202,8 +217,9 @@ operator's machine.
   then **Stop** restores the adapter. No terminal, no manual `iw`/`nmcli`.
   Without sudo it explains how to enable it (and the CLI command still works).
 
-  > Needs **sudo** + a **monitor-mode-capable** Wi-Fi adapter, and only works
-  > for Wi-Fi devices. It reports *relative proximity* (signal trend), not
+  > **Linux only.** Needs **sudo** + a **monitor-mode-capable** Wi-Fi adapter,
+  > and only works for Wi-Fi devices. It reports *relative proximity* (signal
+  > trend), not
   > coordinates — a single antenna can't triangulate. A 2nd USB Wi-Fi adapter
   > lets you stay online while the other sniffs. Trust the trend, not the
   > absolute distance (walls and orientation skew RSSI).
