@@ -160,6 +160,12 @@ it that way:
 - **🔔 Continuous monitoring + alerts** — each rescan is diffed against the last;
   a new device, a newly-opened port, or a device becoming **internet-exposed**
   raises an alert (with optional browser notifications).
+- **🕑 History & timeline** — every device gets a reconstructed timeline (first
+  seen, port-open history, online/offline windows: *"first seen 3 days ago,
+  offline 8 h overnight, back online now"*) in its modal, and a **History**
+  panel surfaces anomalies across the network — *"camera went offline at 2 AM"*,
+  *"new admin/remote service opened"*, *"device appeared overnight"*, *"became
+  internet-exposed"*. One-click **Export history (JSON)** for a compliance trail.
 - **🗒 Engagement log** — every active action (deep audit, password test, scope
   change, report) is timestamped to `~/.viperscan/engagement.jsonl` as an audit
   trail.

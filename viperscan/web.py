@@ -112,7 +112,7 @@ def _logo_bytes() -> bytes:
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import activity, audit, auditreport, behavior, bypass, classify, discovery, identity, probe, report, scope, upnp, wifiloc
+from . import activity, audit, auditreport, behavior, bypass, classify, discovery, identity, probe, report, scope, timeline, upnp, wifiloc
 from .cli import run_scan
 
 # Server-driven Wi-Fi locate session (one-click Find; active only when the
@@ -641,6 +641,30 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif path == "/api/timeline":
+            ip = parse_qs(parsed.query).get("ip", [""])[0]
+            if not _valid_ip(ip):
+                self._json({"error": "bad ip"}, 400)
+            else:
+                self._json(timeline.device_timeline(ip, _find_device(ip), scope.read_events(3000)))
+        elif path == "/api/history":
+            with _LOCK:
+                devices = list(_STATE["devices"])
+            events = scope.read_events(3000)
+            self._json({"anomalies": timeline.anomalies(devices, events),
+                        "recent": events[:120]})
+        elif path == "/api/history/export":
+            with _LOCK:
+                devices = list(_STATE["devices"])
+            payload = json.dumps(timeline.history_export(devices, scope.read_events(5000)), indent=2)
+            body = payload.encode()
+            scope.log_engagement("history_export", "", f"{len(devices)} devices")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Disposition", 'attachment; filename="viperscan-history.json"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif path == "/api/wake":
             ip = parse_qs(parsed.query).get("ip", [""])[0]
             if not _valid_ip(ip):
@@ -1105,6 +1129,16 @@ PAGE = r"""<!DOCTYPE html>
   #helpov h3{margin:0 0 14px;font-size:14px;color:var(--txt)}
   #helpov .hrow{display:flex;justify-content:space-between;gap:24px;font-size:13px;padding:5px 0;color:var(--dim)}
   #helpov kbd{background:rgba(255,255,255,.08);border:1px solid var(--line);border-radius:5px;padding:1px 7px;font-family:ui-monospace,monospace;color:var(--txt)}
+  /* history / timeline */
+  .histsum{display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:12.5px;color:var(--dim)}
+  .histgaps{font-size:11.5px;margin:7px 0}
+  .tline{margin-top:9px}
+  .tlrow{display:flex;gap:12px;padding:4px 0 4px 12px;border-left:2px solid var(--line);font-size:12.5px}
+  .tlrow .tlts{color:var(--dim);font-family:ui-monospace,monospace;white-space:nowrap;min-width:128px}
+  .tlrow .tllbl{color:var(--txt)}
+  .tlrow.sev-high{border-left-color:var(--red)} .tlrow.sev-high .tllbl{color:var(--red)}
+  .tlrow.sev-medium{border-left-color:var(--amber)}
+  .tlrow.sev-muted .tllbl{color:var(--dim)}
 </style></head>
 <body>
 <header>
@@ -1121,6 +1155,7 @@ PAGE = r"""<!DOCTYPE html>
     <button class="tbtn" data-icon="shield" onclick="openPanel('scope')">Scope</button>
     <button class="tbtn" data-icon="bell" onclick="openPanel('alerts')">Alerts <span id="alertcount" class="countpill">0</span></button>
     <button class="tbtn" data-icon="activity" onclick="openPanel('activity')">Activity</button>
+    <button class="tbtn" data-icon="clock" onclick="openPanel('history')">History</button>
     <button class="tbtn" data-icon="chart" onclick="openPanel('selfcheck')">System&nbsp;Check</button>
     <button class="tbtn" data-icon="sparkle" onclick="openPanel('intel')">Intelligence <span id="anomcount" class="countpill">0</span></button>
     <button class="tbtn" id="snifferbtn" data-icon="signal" onclick="toggleSniffer()" title="Put the Wi-Fi sniffer adapter into monitor mode (needed for Find / locate)"><span id="sniflabel">Monitor&nbsp;Mode</span></button>
@@ -1197,6 +1232,7 @@ PAGE = r"""<!DOCTYPE html>
 <script>
 let FILTER="all", DEV=[], BUSY=false, CURRENT_CIDR="", LAST_EVENTS=null;
 const SVGP={
+ clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
  camera:'<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="13" r="3"/>',
  voice:'<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><line x1="12" y1="18" x2="12" y2="22"/>',
  media:'<rect x="2" y="7" width="20" height="13" rx="2"/><path d="m17 2-5 5-5-5"/>',
@@ -1275,6 +1311,41 @@ document.addEventListener("click",hideCtxMenu);
 window.addEventListener("scroll",hideCtxMenu,true);
 function toggleHelp(){ const h=document.getElementById("helpov"); if(h)h.style.display=(h.style.display==="flex")?"none":"flex"; }
 function hideHelp(){ const h=document.getElementById("helpov"); if(h)h.style.display="none"; }
+// --- history / timeline ---
+function loadTimeline(ip){ api("/api/timeline?ip="+encodeURIComponent(ip)).then(r=>{ if(MODAL_IP===ip)renderTimeline(r); }); }
+function renderTimeline(r){
+  const el=document.getElementById("hist-body"); if(!el)return;
+  const s=(r&&r.summary)||{};
+  let h='<div class="histsum">';
+  h+= s.online?'<span style="color:var(--green)">● online now</span>'
+             :'<span style="color:var(--dim)">○ offline'+(s.offline_since?(' since '+esc(s.offline_since)):'')+'</span>';
+  if(s.first_seen)h+='<span>first seen '+esc(s.first_seen_ago||s.first_seen)+'</span>';
+  if(s.days_known!=null)h+='<span>known '+s.days_known+' d</span>';
+  if(s.last_seen_ago)h+='<span>last seen '+esc(s.last_seen_ago)+'</span>';
+  h+='</div>';
+  if((s.offline_gaps||[]).length)
+    h+='<div class="muted histgaps">Offline windows: '+s.offline_gaps.map(g=>esc(g.hours+' h ('+g.from+' → '+g.to+')')).join(' · ')+'</div>';
+  const ent=(r&&r.entries)||[];
+  h+= ent.length
+    ? '<div class="tline">'+ent.slice().reverse().map(e=>'<div class="tlrow sev-'+esc(e.sev||'info')+'"><span class="tlts">'+esc(e.ts||'')+'</span><span class="tllbl">'+esc(e.label||'')+'</span></div>').join('')+'</div>'
+    : '<div class="muted">No recorded events yet — history builds as ViperScan keeps scanning.</div>';
+  el.innerHTML=h;
+}
+function loadHistory(body){
+  body.innerHTML='<span class="spin"></span> loading…';
+  api("/api/history").then(r=>{
+    if(!r){ body.innerHTML='<div class="muted">unavailable</div>'; return; }
+    const an=r.anomalies||[], rec=r.recent||[];
+    let h='<button class="btn" style="margin-bottom:14px" onclick="window.open(\'/api/history/export\',\'_blank\')">⬇ Export history (JSON)</button>';
+    h+='<h4>Anomalies</h4>';
+    h+= an.length? an.map(a=>'<div class="finding '+(a.sev==="high"?"critical":"high")+'"><div class="ft"><span class="sev '+(a.sev==="high"?"critical":"high")+'">'+esc(a.sev)+'</span><span class="ti">'+esc(a.ip||"")+'</span></div><div class="de">'+esc(a.label||"")+'</div><div class="evts">'+esc(a.ts||"")+'</div></div>').join('')
+      : '<div class="muted">✓ Nothing unusual in the recorded history.</div>';
+    h+='<h4 style="margin-top:16px">Recent changes</h4>';
+    h+= rec.length? '<div class="tline">'+rec.map(e=>'<div class="tlrow"><span class="tlts">'+esc(e.ts||"")+'</span><span class="tllbl">'+esc((e.type||"").replace(/_/g," "))+' — '+esc(e.detail||"")+' <span style="color:var(--dim)">'+esc(e.ip||"")+'</span></span></div>').join('')+'</div>'
+      : '<div class="muted">No change events recorded yet.</div>';
+    body.innerHTML=h;
+  });
+}
 
 function aboutHTML(d){
   const svc=d.services||{}, rows=[];
@@ -1590,6 +1661,7 @@ function openDevice(ip){
     '<button class="btn" id="wakebtn" onclick="wakeDevice(\''+escJs(ip)+'\')" title="Ping + TCP-knock this device to wake it / bring it online">'+IC('activity')+' Ping / wake</button>'+
     '<span id="wake-status" class="muted"></span></div>'+
     '<div class="sec" id="sec-annot">'+annotHTML(d)+'</div>'+
+    '<div class="sec" id="sec-history"><h4>History — timeline</h4><div id="hist-body" class="muted"><span class="spin"></span>loading history…</div></div>'+
     '<div class="sec" id="sec-risk"><h4>Risk</h4><div class="muted"><span class="spin"></span>assessing…</div></div>'+
     '<div class="sec" id="sec-panels"><h4>Web / admin panels</h4><div class="muted"><span class="spin"></span>looking for a reachable panel…</div></div>'+
     '<div class="sec" id="sec-findings"><h4>Findings</h4><div class="muted"><span class="spin"></span>running quiet checks…</div></div>'+
@@ -1609,6 +1681,7 @@ function openDevice(ip){
     '<div class="deepnote">Deep audit = nmap + open-stream + anonymous-FTP checks (identification — no password guessing). “Test factory passwords” sends real login attempts the device will log. Both are for devices you own or are authorised to test.</div></div>';
   document.getElementById("overlay").classList.add("on");
   api("/api/panel?ip="+encodeURIComponent(ip)).then(p=>{ if(MODAL_IP===ip)renderPanels(p,ip); });
+  loadTimeline(ip);
   runAudit(ip,false);
 }
 let CUR={findings:[],nmap:{},dev:null,deep:false};
@@ -1680,13 +1753,14 @@ function authorizeNet(cidr){ api("/api/scope?add="+encodeURIComponent(cidr)).the
   const f=document.getElementById("sec-findings"); if(f&&f.innerHTML.indexOf("outside your authorised")>-1)f.innerHTML='<h4>Findings</h4><div class="muted">✓ '+esc(cidr)+' authorised — click Deep audit again.</div>';
 }); }
 function openPanel(kind){
-  document.getElementById("panel-title").textContent={scope:"Authorised scope",alerts:"Monitoring alerts",activity:"Engagement log",selfcheck:"System check — live data proof",intel:"Behavioral intelligence — what ViperScan has learned"}[kind]||"Panel";
+  document.getElementById("panel-title").textContent={scope:"Authorised scope",alerts:"Monitoring alerts",activity:"Engagement log",history:"History — timeline & anomalies",selfcheck:"System check — live data proof",intel:"Behavioral intelligence — what ViperScan has learned"}[kind]||"Panel";
   const body=document.getElementById("panel-body"); body.innerHTML='<div class="muted"><span class="spin"></span>loading…</div>';
   document.getElementById("panel").classList.add("on");
   if(kind==="scope")loadScope(body);
   else if(kind==="alerts"){ if(window.Notification&&Notification.permission==="default")Notification.requestPermission(); loadAlerts(body); }
   else if(kind==="activity")loadActivity(body);
   else if(kind==="selfcheck")loadSelfcheck(body);
+  else if(kind==="history")loadHistory(body);
   else if(kind==="intel")loadIntel(body);
 }
 function huntDown(ip){
