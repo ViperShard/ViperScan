@@ -8,9 +8,14 @@ voice assistants, hidden hosts that hide from ping, exposed admin panels, and
 anything it simply can't identify. Walk into any café, office, Airbnb, or hotel,
 run one command, and see what's on the wire with you.
 
+```bash
+git clone https://github.com/ViperShard/ViperScan
+cd ViperScan && python3 viperscan.py        # live dashboard → http://localhost:8731
 ```
-viperscan
-```
+
+> Throughout this README the command is written **`viperscan`** for brevity.
+> Haven't installed it? That's just `python3 viperscan.py` — identical. To get a
+> real `viperscan` on your `PATH`: `pipx install .` (or `pip install --user .`).
 
 It's **pure Python, standard library only.** No `pip install`, no scapy, no root
 required.
@@ -65,7 +70,7 @@ Linux assumptions are just not yet abstracted for macOS/Windows.
 **One command — everything is in the dashboard.** Just run:
 
 ```bash
-viperscan
+python3 viperscan.py            # or just `viperscan` if you ran pipx install .
 ```
 
 It launches the live web app at **http://localhost:8731** (and opens your
@@ -278,6 +283,19 @@ Run it directly without installing anything:
 python3 viperscan.py            # from inside the ViperScan/ folder
 # or
 ./viperscan-run.sh --web
+```
+
+### Install (optional — for a `viperscan` command on your PATH)
+
+ViperScan runs fine uninstalled (above). If you'd rather type `viperscan` from
+anywhere, install it — it's still stdlib-only, the install just drops a launcher
+on your `PATH`:
+
+```bash
+pipx install .                  # recommended (isolated); from inside ViperScan/
+# or
+pip install --user .
+viperscan                       # now works anywhere → same as python3 viperscan.py
 ```
 
 ### Docker

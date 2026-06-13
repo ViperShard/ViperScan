@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "viperscan"
+version = "1.0.0"
+description = "Zero-dependency, pure-Python LAN scanner — find every device on your network and flag the ones to look at twice."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "ViperShard" }]
+keywords = [
+  "network-scanner", "lan-scanner", "network-security", "network-discovery",
+  "device-discovery", "iot-security", "homelab", "security-tools",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Environment :: Console",
+  "Environment :: Web Environment",
+  "Topic :: System :: Networking :: Monitoring",
+  "Topic :: Security",
+]
+
+[project.urls]
+Homepage = "https://github.com/ViperShard/ViperScan"
+Repository = "https://github.com/ViperShard/ViperScan"
+Issues = "https://github.com/ViperShard/ViperScan/issues"
+
+# This is what creates the `viperscan` command on your PATH after `pipx install .`
+[project.scripts]
+viperscan = "viperscan.cli:main"
+
+[tool.setuptools]
+packages = ["viperscan"]
+py-modules = []                  # the root viperscan.py is the no-install launcher, NOT a packaged module
